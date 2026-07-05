@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 import asyncio
 import json
+import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -546,6 +547,36 @@ def test_bridge_sets_bounded_failure_advisor_timeout(tmp_path, monkeypatch):
 
     assert env["HERMES_CODEX_FAILURE_ADVISOR"] == "1"
     assert env["HERMES_CODEX_FAILURE_ADVISOR_TIMEOUT"] == "45"
+    assert env["HERMES_PYTHON"] == str(bridge.python_executable)
+
+
+def test_bridge_defaults_family_ant_subprocess_python_to_gateway_interpreter(tmp_path, monkeypatch):
+    monkeypatch.delenv("HERMES_FAMILY_ANT_PYTHON", raising=False)
+    monkeypatch.delenv("HERMES_PYTHON", raising=False)
+
+    bridge = HarnessGatewayBridge(hermes_home=tmp_path)
+
+    assert bridge.python_executable == Path(sys.executable).expanduser()
+
+
+def test_bridge_honors_family_ant_python_override(tmp_path, monkeypatch):
+    configured = tmp_path / "venv" / "bin" / "python"
+    monkeypatch.setenv("HERMES_FAMILY_ANT_PYTHON", str(configured))
+    monkeypatch.setenv("HERMES_PYTHON", "/usr/bin/python3")
+
+    bridge = HarnessGatewayBridge(hermes_home=tmp_path)
+
+    assert bridge.python_executable == configured.expanduser()
+
+
+def test_bridge_uses_gateway_interpreter_when_family_ant_override_absent(tmp_path, monkeypatch):
+    configured = tmp_path / "gateway-venv" / "bin" / "python"
+    monkeypatch.delenv("HERMES_FAMILY_ANT_PYTHON", raising=False)
+    monkeypatch.setenv("HERMES_PYTHON", str(configured))
+
+    bridge = HarnessGatewayBridge(hermes_home=tmp_path)
+
+    assert bridge.python_executable == Path(sys.executable).expanduser()
 
 
 def test_fleet_status_uses_completion_readiness_probe():

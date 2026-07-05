@@ -17,7 +17,8 @@ from gateway.family_ant_bridge_format import one_line, payload_questions, summar
 
 DEFAULT_REPO_ROOT = Path("/mnt/hdd/family-ant_harness_refactor")
 DEFAULT_HERMES_HOME = Path("/home/mermiges/.hermes")
-DEFAULT_PYTHON = Path("/usr/bin/python3")
+FAMILY_ANT_PYTHON_ENV = "HERMES_FAMILY_ANT_PYTHON"
+HERMES_PYTHON_ENV = "HERMES_PYTHON"
 ORCH_STATE_ROOT = Path("runs/hermes-orchnl")
 LOCAL_MODE = "local_first"
 DRY_TIMEOUT_SECONDS = 900
@@ -86,11 +87,13 @@ class HarnessGatewayBridge:
         *,
         repo_root: Path = DEFAULT_REPO_ROOT,
         hermes_home: Path = DEFAULT_HERMES_HOME,
-        python_executable: Path = DEFAULT_PYTHON,
+        python_executable: Path | None = None,
     ) -> None:
         self.repo_root = repo_root.expanduser().resolve(strict=False)
         self.hermes_home = hermes_home.expanduser().resolve(strict=False)
-        self.python_executable = python_executable
+        self.python_executable = (
+            python_executable or _default_python_executable()
+        ).expanduser()
         self.sessions: dict[str, HarnessSession] = {}
         self._chat_memory_impl = None
 
@@ -857,6 +860,7 @@ class HarnessGatewayBridge:
         env["FAMILY_ANT_HERMES_HOME"] = str(self.hermes_home)
         env["HERMES_CODEX_FAILURE_ADVISOR"] = "1"
         env.setdefault("HERMES_CODEX_FAILURE_ADVISOR_TIMEOUT", "45")
+        env[HERMES_PYTHON_ENV] = str(self.python_executable)
         env["PYTHONNOUSERSITE"] = "1"
         env["PYTHONPATH"] = _prepend_pythonpath(self.repo_root, env.get("PYTHONPATH"))
         return env
@@ -1302,6 +1306,11 @@ def _state_names_from_text(text: str) -> list[str]:
 
 def _prepend_pythonpath(repo_root: Path, existing: str | None) -> str:
     return str(repo_root) if not existing else f"{repo_root}{os.pathsep}{existing}"
+
+
+def _default_python_executable() -> Path:
+    raw = os.environ.get(FAMILY_ANT_PYTHON_ENV) or sys.executable
+    return Path(raw)
 
 
 def _slug(value: str) -> str:
