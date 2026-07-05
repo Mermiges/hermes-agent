@@ -48,6 +48,31 @@ logger = logging.getLogger("gateway.run")
 class GatewaySlashCommandsMixin:
     """In-session slash-command handlers for GatewayRunner."""
 
+    _FAMILY_ANT_NL_SKIP = frozenset(
+        {
+            "ok",
+            "okay",
+            "yes",
+            "y",
+            "no",
+            "n",
+            "thanks",
+            "thank you",
+            "thx",
+        }
+    )
+    _FAMILY_ANT_NL_GO = frozenset(
+        {
+            "go",
+            "run",
+            "run it",
+            "do it",
+            "execute",
+            "execute it",
+            "proceed",
+        }
+    )
+
     def _typed_command_prefix_for(self, platform) -> str:
         """Return the prefix users can always type to reach Hermes commands.
 
@@ -293,6 +318,138 @@ class GatewaySlashCommandsMixin:
             f"Tier: user\n"
             f"Slash commands you can run: {runnable_str}"
         )
+
+    def _family_ant_harness_bridge(self):
+        """Return the long-lived Family Ant bridge for this gateway process."""
+        from gateway.family_ant_bridge import HarnessGatewayBridge
+
+        bridge = getattr(self, "_family_ant_harness_bridge_impl", None)
+        if bridge is None:
+            bridge = HarnessGatewayBridge()
+            setattr(self, "_family_ant_harness_bridge_impl", bridge)
+        return bridge
+
+    def _should_auto_harness_plain_message(self, event: MessageEvent) -> bool:
+        """Return True when a Telegram DM should default to Family Ant orchestration."""
+        source = event.source
+        if event.message_type != MessageType.TEXT:
+            return False
+        if source is None or source.platform != Platform.TELEGRAM or source.chat_type != "dm":
+            return False
+        text = (event.text or "").strip()
+        if not text or text.startswith("/"):
+            return False
+        bridge = self._family_ant_harness_bridge()
+        session_key = self._session_key_for_source(source)
+        lowered = " ".join(text.lower().split())
+        if bridge.has_pending_questions(session_key) or bridge.has_saved_plan(session_key):
+            return True
+        return lowered not in self._FAMILY_ANT_NL_SKIP
+
+    def _format_harness_failure(self, exc: Exception) -> str:
+        """Render Family Ant bridge failures as a useful Telegram answer."""
+        from gateway.family_ant_bridge import safe_error_line
+
+        detail = safe_error_line(str(exc))
+        lowered = detail.lower()
+        if "no executable plan" in lowered:
+            cause = (
+                "The router did not produce an executable Family Ant workflow. "
+                "That means it failed before selecting a workflow, saving a resumable "
+                "state, or creating a work product."
+            )
+        elif "timed out" in lowered or "timeout" in lowered:
+            cause = (
+                "The local model or workflow timed out before it returned a complete "
+                "answer. I did not treat the partial run as attorney work product."
+            )
+        else:
+            cause = (
+                "The harness raised an orchestration error before it returned a "
+                "usable legal answer."
+            )
+        return (
+            "Analysis:\n"
+            f"{cause}\n\n"
+            "What changed:\n"
+            "- No client files were changed.\n"
+            "- No artifact was produced.\n"
+            "- The failed request remains in the Telegram/Hermes logs for diagnosis.\n\n"
+            "Next:\n"
+            "Send the task again in ordinary language with the client name and the "
+            "specific work product or question. You do not need to use /answer.\n\n"
+            f"Diagnostic: {type(exc).__name__}: {detail}"
+        )
+
+    async def _handle_harness_plain_message(self, event: MessageEvent) -> str:
+        """Route a normal Telegram DM through the Family Ant harness bridge."""
+        text = (event.text or "").strip()
+        source = event.source
+        session_key = self._session_key_for_source(source)
+        bridge = self._family_ant_harness_bridge()
+        lowered = " ".join(text.lower().split())
+        try:
+            if lowered in self._FAMILY_ANT_NL_GO and bridge.has_saved_plan(session_key):
+                return await bridge.go(session_key)
+            if bridge.has_pending_questions(session_key):
+                return await bridge.answer(session_key, text)
+            return await bridge.plan(session_key, text)
+        except Exception as exc:  # noqa: BLE001 - Telegram needs a short failure line.
+            logger.warning("Family Ant plain NL failed: %s: %s", type(exc).__name__, exc)
+            return self._format_harness_failure(exc)
+
+    async def _handle_harness_command(self, event: MessageEvent) -> str:
+        """Handle /harness — dry-run a Family Ant Hermes orchestration plan."""
+        session_key = self._session_key_for_source(event.source)
+        try:
+            return await self._family_ant_harness_bridge().plan(
+                session_key,
+                event.get_command_args(),
+            )
+        except Exception as exc:  # noqa: BLE001 - Telegram needs a short failure line.
+            logger.warning("Family Ant /harness failed: %s: %s", type(exc).__name__, exc)
+            return self._format_harness_failure(exc)
+
+    async def _handle_go_command(self, event: MessageEvent) -> str:
+        """Handle /go — execute the saved Family Ant dry-run plan."""
+        session_key = self._session_key_for_source(event.source)
+        try:
+            return await self._family_ant_harness_bridge().go(session_key)
+        except Exception as exc:  # noqa: BLE001 - Telegram needs a short failure line.
+            logger.warning("Family Ant /go failed: %s: %s", type(exc).__name__, exc)
+            return self._format_harness_failure(exc)
+
+    async def _handle_answer_command(self, event: MessageEvent) -> str:
+        """Handle /answer — answer pending Family Ant orchestration questions."""
+        session_key = self._session_key_for_source(event.source)
+        try:
+            return await self._family_ant_harness_bridge().answer(
+                session_key,
+                event.get_command_args(),
+            )
+        except Exception as exc:  # noqa: BLE001 - Telegram needs a short failure line.
+            logger.warning("Family Ant /answer failed: %s: %s", type(exc).__name__, exc)
+            return self._format_harness_failure(exc)
+
+    async def _handle_brain_command(self, event: MessageEvent) -> str:
+        """Handle /brain — switch the Family Ant Hermes router brain."""
+        from gateway.family_ant_bridge import safe_error_line
+
+        try:
+            return self._family_ant_harness_bridge().brain(event.get_command_args())
+        except Exception as exc:  # noqa: BLE001 - Telegram needs a short failure line.
+            logger.warning("Family Ant /brain failed: %s: %s", type(exc).__name__, exc)
+            return f"Brain command failed: {type(exc).__name__}: {safe_error_line(str(exc))}"
+
+    async def _handle_hstatus_command(self, event: MessageEvent) -> str:
+        """Handle /hstatus — report Family Ant Hermes fleet and state status."""
+        from gateway.family_ant_bridge import safe_error_line
+
+        try:
+            return await self._family_ant_harness_bridge().status()
+        except Exception as exc:  # noqa: BLE001 - Telegram needs a short failure line.
+            logger.warning("Family Ant /hstatus failed: %s: %s", type(exc).__name__, exc)
+            return f"Harness status failed: {type(exc).__name__}: {safe_error_line(str(exc))}"
 
     async def _handle_kanban_command(self, event: MessageEvent) -> str:
         """Handle /kanban — delegate to the shared kanban CLI.

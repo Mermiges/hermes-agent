@@ -7534,6 +7534,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # clearly moved on.
             _slash_confirm_mod.clear_if_stale(_quick_key)
 
+        if self._should_auto_harness_plain_message(event):
+            return await self._handle_harness_plain_message(event)
+
         # PRIORITY handling when an agent is already running for this session.
         # Default behavior is to interrupt immediately so user text/stop messages
         # are handled with minimal latency.
@@ -7767,6 +7770,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # mid-run is the whole point of the board.
             if _cmd_def_inner and _cmd_def_inner.name == "kanban":
                 return await self._handle_kanban_command(event)
+
+            if _cmd_def_inner and _cmd_def_inner.name in {"harness", "go", "answer", "brain", "hstatus"}:
+                if _cmd_def_inner.name == "harness":
+                    return await self._handle_harness_command(event)
+                if _cmd_def_inner.name == "go":
+                    return await self._handle_go_command(event)
+                if _cmd_def_inner.name == "answer":
+                    return await self._handle_answer_command(event)
+                if _cmd_def_inner.name == "brain":
+                    return await self._handle_brain_command(event)
+                return await self._handle_hstatus_command(event)
 
             # /goal is safe mid-run for status/pause/clear/wait (inspection
             # and control-plane only — doesn't interrupt the running turn).
@@ -8085,6 +8099,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if canonical == "status":
             return await self._handle_status_command(event)
+
+        if canonical == "hstatus":
+            return await self._handle_hstatus_command(event)
+
+        if canonical == "brain":
+            return await self._handle_brain_command(event)
+
+        if canonical == "harness":
+            return await self._handle_harness_command(event)
+
+        if canonical == "go":
+            return await self._handle_go_command(event)
+
+        if canonical == "answer":
+            return await self._handle_answer_command(event)
 
         if canonical == "agents":
             return await self._handle_agents_command(event)
