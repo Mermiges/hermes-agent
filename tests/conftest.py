@@ -13,6 +13,9 @@ Hermetic-test invariants enforced here (see AGENTS.md for rationale):
 3. **Deterministic runtime.** TZ=UTC, LANG=C.UTF-8, PYTHONHASHSEED=0.
 4. **No HERMES_SESSION_* inheritance** — the agent's current gateway
    session must not leak into tests.
+5. **Isolated Family Ant prompt ledger.** HERMES_PROMPT_LEDGER points
+   under the per-test HERMES_HOME so bridge tests cannot write synthetic
+   rows into the operator's live Family Ant ledger.
 
 These invariants make the local test run match CI closely. Gaps that
 remain (CPU count, xdist worker count) are addressed by the canonical
@@ -199,6 +202,7 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
     "HERMES_BACKGROUND_NOTIFICATIONS",
     "HERMES_EXEC_ASK",
     "HERMES_HOME_MODE",
+    "HERMES_PROMPT_LEDGER",
     "HERMES_AGENT_USE_LEGACY_SESSION_KEYS",
     # Kanban path/board pins must never leak from a developer shell or
     # dispatched worker into tests; otherwise tests can write fake tasks to
@@ -344,6 +348,8 @@ def _hermetic_environment(tmp_path, monkeypatch):
 
     # 3. Redirect HERMES_HOME to a per-test tempdir. Code that reads
     #    ``~/.hermes/*`` via ``get_hermes_home()`` now gets the tempdir.
+    #    Family Ant prompt-ledger calls are pinned under the same home so
+    #    gateway bridge tests do not pollute the operator's live ledger.
     #
     #    NOTE: We do NOT also redirect HOME. Doing so broke CI because
     #    some tests (and their transitive deps) spawn subprocesses that
@@ -359,6 +365,10 @@ def _hermetic_environment(tmp_path, monkeypatch):
     (fake_hermes_home / "memories").mkdir()
     (fake_hermes_home / "skills").mkdir()
     monkeypatch.setenv("HERMES_HOME", str(fake_hermes_home))
+    monkeypatch.setenv(
+        "HERMES_PROMPT_LEDGER",
+        str(fake_hermes_home / "logs" / "prompt-ledger" / "hermes-events.jsonl"),
+    )
 
     # 4. Deterministic locale / timezone / hashseed. CI runs in UTC with
     #    C.UTF-8 locale; local dev often doesn't. Pin everything.
