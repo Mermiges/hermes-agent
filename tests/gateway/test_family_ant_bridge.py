@@ -300,6 +300,70 @@ class NonJsonSummaryBridge(HarnessGatewayBridge):
         }
 
 
+class RaisedSummaryBridge(HarnessGatewayBridge):
+    def __init__(self, repo_root: Path) -> None:
+        super().__init__(
+            repo_root=repo_root,
+            hermes_home=Path(tempfile.mkdtemp(prefix="hermes-test-home-")),
+        )
+
+    def _resolve_matter(self, request: str, *, session_key: str) -> MatterTarget:
+        return MatterTarget("chipman-chris", Path("/tmp/chipman"), request)
+
+    async def _run(
+        self,
+        command: list[str],
+        *,
+        timeout: int,
+        ok_returncodes: tuple[int, ...] = (0, 2),
+    ) -> tuple[str, str]:
+        raise RuntimeError(
+            "Harness command failed: RuntimeError: Hermes summary: "
+            "- status: failed - planned: no executable plan - ran: nothing "
+            "- produced: no artifact paths reported - codex_help: not requested "
+            "- resume: unavailable; no state_dir was recorded"
+        )
+
+    def _codex_failure_advice(self, payload: dict, *, state_dir: Path) -> dict:
+        return {
+            "status": "completed",
+            "text": "root cause: subprocess raised raw Hermes summary; retry through structured payload boundary.",
+        }
+
+
+class SparseFailedJsonBridge(HarnessGatewayBridge):
+    def __init__(self, repo_root: Path) -> None:
+        super().__init__(
+            repo_root=repo_root,
+            hermes_home=Path(tempfile.mkdtemp(prefix="hermes-test-home-")),
+        )
+
+    def _resolve_matter(self, request: str, *, session_key: str) -> MatterTarget:
+        return MatterTarget("chipman-chris", Path("/tmp/chipman"), request)
+
+    async def _run(
+        self,
+        command: list[str],
+        *,
+        timeout: int,
+        ok_returncodes: tuple[int, ...] = (0, 2),
+    ) -> tuple[str, str]:
+        return json.dumps(
+            {
+                "status": "failed",
+                "plan": {},
+                "validation": {"questions": []},
+                "steps": [],
+            }
+        ), ""
+
+    def _codex_failure_advice(self, payload: dict, *, state_dir: Path) -> dict:
+        return {
+            "status": "completed",
+            "text": "root cause: harness returned failed payload without state; persist gateway diagnostic.",
+        }
+
+
 class FleetStatusHarnessBridge(HarnessGatewayBridge):
     def __init__(self) -> None:
         super().__init__(hermes_home=Path(tempfile.mkdtemp(prefix="hermes-test-home-")))
@@ -587,6 +651,37 @@ def test_bridge_synthesizes_state_for_non_json_no_plan_summary(tmp_path: Path):
     state = json.loads(state_path.read_text(encoding="utf-8"))
     assert state["failure_advice"]["status"] == "completed"
     assert state["plan"]["summary"] == "Hermes failed before it could build an executable plan."
+
+
+def test_bridge_synthesizes_state_for_raised_no_plan_summary(tmp_path: Path):
+    bridge = RaisedSummaryBridge(tmp_path)
+    rendered = asyncio.run(bridge.plan("session-1", "Chipman: update profile and wiki"))
+
+    assert "Hermes failed before it returned a reliable legal-workflow answer" in rendered
+    assert "Saved state: gateway-failure-" in rendered
+    assert "Codex diagnostic (completed): root cause: subprocess raised raw Hermes summary" in rendered
+    assert "I will not run this automatically" in rendered
+    assert "Harness command failed" not in rendered
+    assert "no state_dir was recorded" not in rendered
+    session = bridge.sessions["session-1"]
+    state = json.loads((Path(session.state_dir) / "state.json").read_text(encoding="utf-8"))
+    assert state["failure_advice"]["status"] == "completed"
+    assert state["plan"]["request"] == "Chipman: update profile and wiki"
+
+
+def test_bridge_synthesizes_state_for_sparse_failed_json_payload(tmp_path: Path):
+    bridge = SparseFailedJsonBridge(tmp_path)
+    rendered = asyncio.run(bridge.plan("session-1", "Chipman: update profile and wiki"))
+
+    assert "Hermes failed before it returned a reliable legal-workflow answer" in rendered
+    assert "Saved state: gateway-failure-" in rendered
+    assert "Codex diagnostic (completed): root cause: harness returned failed payload without state" in rendered
+    assert "Harness command failed" not in rendered
+    assert "no state_dir was recorded" not in rendered
+    session = bridge.sessions["session-1"]
+    state = json.loads((Path(session.state_dir) / "state.json").read_text(encoding="utf-8"))
+    assert state["failure_advice"]["status"] == "completed"
+    assert state["validation"]["errors"][0].startswith("gateway_orchestrate_failed:")
 
 
 def test_bridge_plan_writes_prompt_ledger(tmp_path, monkeypatch):

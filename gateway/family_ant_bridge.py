@@ -670,7 +670,17 @@ class HarnessGatewayBridge:
             "--hermes-home",
             str(self.hermes_home),
         ]
-        completed = await self._run(command, timeout=timeout, ok_returncodes=(0, 1, 2))
+        try:
+            completed = await self._run(command, timeout=timeout, ok_returncodes=(0, 1, 2))
+        except RuntimeError as exc:
+            detail = safe_error_line(str(exc))
+            if _looks_like_harness_summary_failure(detail):
+                return self._synthesize_failed_orchestration_payload(
+                    args=args,
+                    detail=detail,
+                    reason="Orchestration subprocess exited before returning JSON.",
+                )
+            raise
         try:
             payload = json.loads(completed[0])
         except json.JSONDecodeError as exc:
@@ -685,6 +695,12 @@ class HarnessGatewayBridge:
             raise RuntimeError(f"Harness returned non-JSON output: {exc}; {err}") from exc
         if not isinstance(payload, dict):
             raise RuntimeError("Harness JSON payload was not an object.")
+        if _failed_payload_lacks_diagnostic_state(payload):
+            return self._synthesize_failed_orchestration_payload(
+                args=args,
+                detail=json.dumps(payload, sort_keys=True, default=str),
+                reason="Harness returned a failed orchestration payload without saved diagnostic state.",
+            )
         return payload
 
     def _synthesize_failed_orchestration_payload(
@@ -1115,12 +1131,33 @@ def _looks_like_harness_summary_failure(text: str) -> bool:
     )
 
 
+def _failed_payload_lacks_diagnostic_state(payload: Mapping[str, Any]) -> bool:
+    status = str(payload.get("status") or "").casefold()
+    if status not in {"failed", "invalid_plan"}:
+        return False
+    if not str(payload.get("state_dir") or "").strip():
+        return True
+    plan = payload.get("plan") if isinstance(payload.get("plan"), Mapping) else {}
+    steps = plan.get("steps") if isinstance(plan.get("steps"), list) else []
+    has_plan_surface = bool(str(plan.get("summary") or "").strip() or steps)
+    if has_plan_surface:
+        return False
+    return not isinstance(payload.get("failure_advice"), Mapping)
+
+
 def _orchestrate_request_from_args(args: list[str]) -> str:
     if not args or args[0] != "orchestrate":
         return ""
     if len(args) > 1 and not str(args[1]).startswith("--"):
-        return str(args[1])
+        return _strip_gateway_memory_context(str(args[1]))
     return ""
+
+
+def _strip_gateway_memory_context(text: str) -> str:
+    marker = "\n\nRecent Hermes chat memory."
+    if marker in text:
+        return text.split(marker, 1)[0].rstrip()
+    return text
 
 
 def _flag_value(args: list[str], flag: str) -> str:
