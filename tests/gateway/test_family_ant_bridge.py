@@ -131,6 +131,17 @@ class FailingBridge(FakeBridge):
         )
 
 
+class RawHarnessPrefixFailingBridge(FakeBridge):
+    async def plan(self, session_key: str, request: str) -> str:
+        self.calls.append(("plan", session_key, request))
+        raise RuntimeError(
+            "Harness command failed: RuntimeError: Hermes summary: "
+            "- status: failed - planned: no executable plan - ran: nothing "
+            "- produced: no artifact paths reported - questions: none "
+            "- codex_help: not requested - resume: unavailable; no state_dir was recorded"
+        )
+
+
 class RecoveringFailingHarnessBridge(HarnessGatewayBridge):
     def __init__(self, repo_root: Path) -> None:
         super().__init__(
@@ -739,6 +750,25 @@ def test_plain_harness_failure_is_associate_style_not_raw_runtime_error():
     assert "You do not need to use /answer" in result
     assert "Diagnostic: RuntimeError:" in result
     assert "Harness command failed" not in result
+    assert bridge.calls[0] == (
+        "plan",
+        "agent:main:telegram:dm:c1",
+        "Chipman: update profile and wiki",
+    )
+
+
+def test_plain_harness_failure_scrubs_raw_harness_prefix_fallback():
+    bridge = RawHarnessPrefixFailingBridge()
+    result = asyncio.run(
+        _runner(bridge)._handle_message(_event("Chipman: update profile and wiki"))
+    )
+
+    assert "Analysis:" in result
+    assert "router did not produce an executable Family Ant workflow" in result
+    assert "Diagnostic: RuntimeError: Hermes summary failure" in result
+    assert "Harness command failed" not in result
+    assert "codex_help: not requested" not in result
+    assert "no state_dir was recorded" not in result
     assert bridge.calls[0] == (
         "plan",
         "agent:main:telegram:dm:c1",

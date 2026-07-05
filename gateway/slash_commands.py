@@ -45,6 +45,23 @@ from utils import (
 logger = logging.getLogger("gateway.run")
 
 
+def _scrub_harness_failure_detail(detail: str) -> str:
+    """Keep fallback diagnostics useful without replaying stale raw harness text."""
+
+    clean = " ".join(str(detail or "").split())
+    lowered = clean.casefold()
+    if "hermes summary:" in lowered and "no executable plan" in lowered:
+        return (
+            "Hermes summary failure: router produced no executable plan before "
+            "the failing path returned a saved diagnostic state."
+        )
+    if lowered.startswith("harness command failed:"):
+        clean = clean.split(":", 1)[1].strip()
+    if clean.casefold().startswith("runtimeerror: hermes summary:"):
+        return "Hermes summary failure returned through a raw RuntimeError boundary."
+    return clean
+
+
 class GatewaySlashCommandsMixin:
     """In-session slash-command handlers for GatewayRunner."""
 
@@ -368,6 +385,7 @@ class GatewaySlashCommandsMixin:
                 "The harness raised an orchestration error before it returned a "
                 "usable legal answer."
             )
+        diagnostic = f"{type(exc).__name__}: {_scrub_harness_failure_detail(detail)}"
         return (
             "Analysis:\n"
             f"{cause}\n\n"
@@ -378,7 +396,7 @@ class GatewaySlashCommandsMixin:
             "Next:\n"
             "Send the task again in ordinary language with the client name and the "
             "specific work product or question. You do not need to use /answer.\n\n"
-            f"Diagnostic: {type(exc).__name__}: {detail}"
+            f"Diagnostic: {diagnostic}"
         )
 
     def _recover_harness_failure(self, bridge, session_key: str, request: str, exc: Exception) -> str:
