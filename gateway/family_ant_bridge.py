@@ -1115,6 +1115,8 @@ def _looks_like_completed_followup(text: str) -> bool:
         return True
     if "what is she searching for" in normalized or "what was she searching for" in normalized:
         return True
+    if "search history" in normalized and normalized.startswith(("summarize", "summary", "analyze", "analyse", "review", "tell me", "what")):
+        return True
     if normalized in {"what can we do", "what now", "now what"}:
         return True
     return len(words) <= 8 and "patterns" in words

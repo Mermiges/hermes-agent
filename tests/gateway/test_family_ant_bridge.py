@@ -522,6 +522,52 @@ def test_bridge_preserves_matter_memory_when_autorun_payload_omits_matter(tmp_pa
     assert target.request == "summarize search history"
 
 
+def test_bridge_search_history_followup_uses_completed_payload(tmp_path):
+    bridge = HarnessGatewayBridge(repo_root=tmp_path, hermes_home=tmp_path / "home")
+    state_dir = tmp_path / "runs" / "hermes-orchnl" / "state-case-search"
+    state_dir.mkdir(parents=True)
+    (state_dir / "state.json").write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "state_dir": str(state_dir),
+                "plan": {
+                    "summary": "Completed case-search.",
+                    "matter_id": "chipman-chris",
+                    "matter_path": str(tmp_path / "Chipman Chris"),
+                    "steps": [{"kind": "case_search", "tool": "case_search"}],
+                },
+                "validation": {"questions": []},
+                "steps": [
+                    {
+                        "kind": "case_search",
+                        "tool": "case_search",
+                        "status": "completed",
+                        "terminal_status": "NEEDS_REVIEW",
+                        "payload": {
+                            "answer": "Found source-backed depression search-history references [S1].",
+                            "review_status": "NEEDS_REVIEW",
+                            "sources": [{"source_id": "S1"}],
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    bridge.sessions["session-1"] = SimpleNamespace(
+        state_dir=str(state_dir),
+        status="completed",
+        has_questions=False,
+        pending_request="Chipman search history",
+    )
+    bridge._associate_response = lambda *args, **kwargs: "associate search-history summary"
+
+    rendered = bridge._completed_followup("session-1", "summarize search history")
+
+    assert rendered == "associate search-history summary"
+
+
 def test_bridge_ignores_closed_persistent_chat_memory(tmp_path):
     from gateway.family_ant_bridge import BridgeUserQuestion
 
