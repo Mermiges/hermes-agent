@@ -545,6 +545,18 @@ class HarnessGatewayBridge:
         matter_path = str(plan.get("matter_path") or "").strip()
         has_questions = bool(payload_questions(payload))
         existing = self._session(session_key)
+        remembered: Mapping[str, Any] = {}
+        if not matter_id or not matter_path:
+            try:
+                raw_memory = self._chat_memory().session(session_key)
+            except Exception:
+                raw_memory = {}
+            if isinstance(raw_memory, Mapping):
+                remembered = raw_memory
+        if not matter_id:
+            matter_id = str(remembered.get("matter_id") or "").strip()
+        if not matter_path:
+            matter_path = str(remembered.get("matter_path") or "").strip()
         pending_request = (request or (existing.pending_request if existing is not None else "") or "").strip()
         self.sessions[session_key] = HarnessSession(
             state_dir=state_dir,

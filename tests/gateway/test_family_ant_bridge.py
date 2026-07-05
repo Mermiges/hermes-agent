@@ -372,6 +372,36 @@ def test_bridge_uses_persistent_chat_memory_for_same_client_request(tmp_path):
     assert target.matter_path == tmp_path
 
 
+def test_bridge_preserves_matter_memory_when_autorun_payload_omits_matter(tmp_path):
+    bridge = HarnessGatewayBridge(hermes_home=tmp_path)
+    matter_path = tmp_path / "Chipman Chris"
+    matter_path.mkdir()
+    bridge._chat_memory().update_session(
+        "session-1",
+        matter_id="chipman-chris",
+        matter_path=str(matter_path),
+        has_questions=False,
+    )
+
+    bridge._remember(
+        "session-1",
+        {
+            "status": "completed",
+            "state_dir": str(tmp_path / "state-completed"),
+            "plan": {"summary": "Completed auto-run payload without matter fields.", "steps": []},
+            "validation": {"questions": []},
+            "steps": [],
+        },
+        request="Chipman: update profile and wiki",
+    )
+
+    target = bridge._resolve_matter("summarize search history", session_key="session-1")
+
+    assert target.matter_id == "chipman-chris"
+    assert target.matter_path == matter_path
+    assert target.request == "summarize search history"
+
+
 def test_bridge_ignores_closed_persistent_chat_memory(tmp_path):
     from gateway.family_ant_bridge import BridgeUserQuestion
 
