@@ -171,6 +171,44 @@ class ManualBoundaryBridge(StubHarnessBridge):
         }
 
 
+class CompletedAutoRunBridge(StubHarnessBridge):
+    async def _run_orchestrate(self, args: list[str], *, timeout: int) -> dict:
+        self.commands.append(args)
+        if len(self.commands) == 1:
+            return {
+                "status": "dry_run",
+                "state_dir": "/repo/runs/hermes-orchnl/state-case-search",
+                "plan": {
+                    "summary": "Search the local case file.",
+                    "steps": [{"kind": "case_search", "tool": "case_search"}],
+                },
+                "validation": {"questions": []},
+                "steps": [],
+            }
+        return {
+            "status": "completed",
+            "state_dir": "/repo/runs/hermes-orchnl/state-case-search",
+            "plan": {
+                "summary": "Search the local case file.",
+                "steps": [{"kind": "case_search", "tool": "case_search"}],
+            },
+            "validation": {"questions": []},
+            "steps": [
+                {
+                    "kind": "case_search",
+                    "tool": "case_search",
+                    "status": "completed",
+                    "terminal_status": "NEEDS_REVIEW",
+                    "payload": {
+                        "answer": "Found source-backed depression search-history references [S1].",
+                        "review_status": "NEEDS_REVIEW",
+                        "sources": [{"source_id": "S1"}],
+                    },
+                }
+            ],
+        }
+
+
 class IntakeQuestionBridge(StubHarnessBridge):
     def _resolve_matter(self, request: str, *, session_key: str) -> MatterTarget:
         if ":" not in request:
@@ -197,6 +235,42 @@ class FailedJsonSubprocessBridge(HarnessGatewayBridge):
     ) -> tuple[str, str]:
         self.ok_returncodes = ok_returncodes
         return json.dumps(_failed_harness_payload()), ""
+
+
+class NonJsonSummaryBridge(HarnessGatewayBridge):
+    def __init__(self, repo_root: Path) -> None:
+        super().__init__(
+            repo_root=repo_root,
+            hermes_home=Path(tempfile.mkdtemp(prefix="hermes-test-home-")),
+        )
+        self.ok_returncodes: tuple[int, ...] | None = None
+
+    def _resolve_matter(self, request: str, *, session_key: str) -> MatterTarget:
+        return MatterTarget("chipman-chris", Path("/tmp/chipman"), request)
+
+    async def _run(
+        self,
+        command: list[str],
+        *,
+        timeout: int,
+        ok_returncodes: tuple[int, ...] = (0, 2),
+    ) -> tuple[str, str]:
+        self.ok_returncodes = ok_returncodes
+        return "", (
+            "Hermes summary:\n"
+            "- status: failed\n"
+            "- planned: no executable plan\n"
+            "- ran: nothing\n"
+            "- produced: no artifact paths reported\n"
+            "- codex_help: not requested\n"
+            "- resume: unavailable; no state_dir was recorded"
+        )
+
+    def _codex_failure_advice(self, payload: dict, *, state_dir: Path) -> dict:
+        return {
+            "status": "completed",
+            "text": "root cause: gateway received non-JSON summary; retry through CLI JSON boundary.",
+        }
 
 
 def test_bridge_plan_builds_dry_run_command_and_remembers_state():
@@ -232,6 +306,16 @@ def test_bridge_does_not_auto_run_manual_service_boundary():
     assert "will not auto-run service, delivery" in rendered
     assert "Review the documents, recipients" in rendered
     assert "I can run this now unless you say stop" not in rendered
+
+
+def test_bridge_completed_auto_run_says_what_it_will_do_first():
+    bridge = CompletedAutoRunBridge()
+    rendered = asyncio.run(bridge.plan("session-1", "Chipman: search history for depression"))
+
+    assert rendered.startswith("I will search the local case file and return a source-supported analysis.")
+    assert "\nAnalysis:" in rendered
+    assert "Found source-backed depression search-history references [S1]" in rendered
+    assert "Next: send go" not in rendered
 
 
 def test_plain_answer_resumes_pending_intake_question():
@@ -369,6 +453,26 @@ def test_bridge_accepts_failed_json_payload_from_harness_returncode():
     assert "I will not run this automatically" in rendered
     assert "I can run this now unless" not in rendered
     assert bridge.sessions["session-1"].pending_request == "Chipman: update profile and wiki"
+
+
+def test_bridge_synthesizes_state_for_non_json_no_plan_summary(tmp_path: Path):
+    bridge = NonJsonSummaryBridge(tmp_path)
+    rendered = asyncio.run(bridge.plan("session-1", "Chipman: update profile and wiki"))
+
+    assert bridge.ok_returncodes == (0, 1, 2)
+    assert "Hermes failed before it returned a reliable legal-workflow answer" in rendered
+    assert "Saved state: gateway-failure-" in rendered
+    assert "Codex diagnostic (completed): root cause: gateway received non-JSON summary" in rendered
+    assert "gateway_orchestrate_failed" in rendered
+    assert "I will not run this automatically" in rendered
+    assert "Harness command failed" not in rendered
+    assert "no state_dir was recorded" not in rendered
+    session = bridge.sessions["session-1"]
+    assert session.state_dir
+    state_path = Path(session.state_dir) / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["failure_advice"]["status"] == "completed"
+    assert state["plan"]["summary"] == "Hermes failed before it could build an executable plan."
 
 
 def test_bridge_plan_writes_prompt_ledger(tmp_path, monkeypatch):

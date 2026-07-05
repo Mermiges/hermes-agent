@@ -8,6 +8,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -195,6 +196,7 @@ class HarnessGatewayBridge:
                 run_payload=run_payload,
                 plan_payload=payload,
             )
+            reply = _auto_run_reply(payload, run_payload, rendered=reply)
             self._append_chat(session_key, role="assistant", text=reply, event="auto_run_result")
             return reply
         lines = [summarize_payload(payload)]
@@ -334,6 +336,7 @@ class HarnessGatewayBridge:
                 run_payload=run_payload,
                 plan_payload=payload,
             )
+            reply = _auto_run_reply(payload, run_payload, rendered=reply)
             self._append_chat(session_key, role="assistant", text=reply, event="auto_run_result")
             return reply
         lines = [summarize_payload(payload)]
@@ -630,11 +633,101 @@ class HarnessGatewayBridge:
         try:
             payload = json.loads(completed[0])
         except json.JSONDecodeError as exc:
-            err = safe_error_line(completed[1] or completed[0])
+            combined = "\n".join(part for part in completed if str(part or "").strip())
+            if _looks_like_harness_summary_failure(combined):
+                return self._synthesize_failed_orchestration_payload(
+                    args=args,
+                    detail=combined,
+                    reason=f"Harness returned non-JSON summary output: {exc}",
+                )
+            err = safe_error_line(combined)
             raise RuntimeError(f"Harness returned non-JSON output: {exc}; {err}") from exc
         if not isinstance(payload, dict):
             raise RuntimeError("Harness JSON payload was not an object.")
         return payload
+
+    def _synthesize_failed_orchestration_payload(
+        self,
+        *,
+        args: list[str],
+        detail: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+        state_dir = self.repo_root / ORCH_STATE_ROOT / f"gateway-failure-{stamp}"
+        request = _orchestrate_request_from_args(args)
+        matter_id = _flag_value(args, "--matter-id")
+        matter_path = _flag_value(args, "--matter-path") or str(self.repo_root)
+        error = f"gateway_orchestrate_failed:{safe_error_line(reason or detail)}"
+        plan = {
+            "version": "orchnl.v1",
+            "request": request,
+            "matter_id": matter_id,
+            "matter_path": matter_path,
+            "summary": "Hermes failed before it could build an executable plan.",
+            "steps": [],
+            "questions": [],
+        }
+        payload: dict[str, Any] = {
+            "status": "failed",
+            "dry_run": "--dry-run" in args,
+            "state_dir": str(state_dir),
+            "plan": plan,
+            "validation": {
+                "ok": False,
+                "executable": False,
+                "errors": [error],
+                "questions": [],
+            },
+            "steps": [],
+            "memory_diffs": [],
+            "answers": [],
+            "error": safe_error_line(reason or detail),
+            "router": {"planning_error": error},
+        }
+        self._write_gateway_failure_state(state_dir, payload)
+        advice = self._codex_failure_advice(payload, state_dir=state_dir)
+        if advice is not None:
+            payload["failure_advice"] = advice
+            self._write_gateway_failure_state(state_dir, payload)
+        return payload
+
+    def _write_gateway_failure_state(self, state_dir: Path, payload: Mapping[str, Any]) -> None:
+        try:
+            state_dir.mkdir(parents=True, exist_ok=True)
+            plan = payload.get("plan") if isinstance(payload.get("plan"), Mapping) else {}
+            (state_dir / "plan.json").write_text(
+                json.dumps(plan, indent=2, sort_keys=True, default=str) + "\n",
+                encoding="utf-8",
+            )
+            (state_dir / "state.json").write_text(
+                json.dumps(dict(payload), indent=2, sort_keys=True, default=str) + "\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            return
+
+    def _codex_failure_advice(self, payload: Mapping[str, Any], *, state_dir: Path) -> dict[str, Any] | None:
+        old_enabled = os.environ.get("HERMES_CODEX_FAILURE_ADVISOR")
+        old_timeout = os.environ.get("HERMES_CODEX_FAILURE_ADVISOR_TIMEOUT")
+        os.environ["HERMES_CODEX_FAILURE_ADVISOR"] = "1"
+        os.environ.setdefault("HERMES_CODEX_FAILURE_ADVISOR_TIMEOUT", "45")
+        try:
+            self._ensure_harness_imports()
+            from hermes.failure_advisor import codex_failure_advice
+
+            return codex_failure_advice(payload=payload, repo_root=self.repo_root, state_dir=state_dir)
+        except Exception as exc:  # noqa: BLE001 - gateway failure synthesis must not mask the original failure.
+            return {"status": "unavailable", "error": f"{type(exc).__name__}: {safe_error_line(str(exc))}"}
+        finally:
+            if old_enabled is None:
+                os.environ.pop("HERMES_CODEX_FAILURE_ADVISOR", None)
+            else:
+                os.environ["HERMES_CODEX_FAILURE_ADVISOR"] = old_enabled
+            if old_timeout is None:
+                os.environ.pop("HERMES_CODEX_FAILURE_ADVISOR_TIMEOUT", None)
+            else:
+                os.environ["HERMES_CODEX_FAILURE_ADVISOR_TIMEOUT"] = old_timeout
 
     async def _fleet_status(self) -> str:
         command = [
@@ -809,11 +902,26 @@ def _is_completed_payload_with_answer(payload: Mapping[str, Any] | None) -> bool
     return bool(_raw_case_search_answer(payload.get("steps")))
 
 
-def _auto_run_reply(plan_payload: Mapping[str, Any], run_payload: Mapping[str, Any]) -> str:
-    lines = ["I will " + _plain_action_summary(plan_payload) + "."]
-    rendered = _completed_followup_summary("", run_payload)
+def _auto_run_reply(
+    plan_payload: Mapping[str, Any],
+    run_payload: Mapping[str, Any],
+    *,
+    rendered: str = "",
+) -> str:
+    lines = [_auto_run_lead(plan_payload, run_payload)]
+    rendered = rendered or _completed_followup_summary("", run_payload)
     lines.append(rendered or summarize_payload(run_payload))
     return "\n".join(line for line in lines if line).strip()[:3900]
+
+
+def _auto_run_lead(plan_payload: Mapping[str, Any], run_payload: Mapping[str, Any]) -> str:
+    status = str(run_payload.get("status") or "").casefold()
+    action = _plain_action_summary(plan_payload)
+    if status in {"completed", "needs_review"}:
+        return "I will " + action + "."
+    if status in {"failed", "invalid_plan"}:
+        return "I tried to " + action + ", but Hermes failed before producing reviewable work."
+    return ""
 
 
 def _plain_action_summary(payload: Mapping[str, Any]) -> str:
@@ -937,6 +1045,39 @@ def _looks_like_completed_followup(text: str) -> bool:
     if normalized in {"what can we do", "what now", "now what"}:
         return True
     return len(words) <= 8 and "patterns" in words
+
+
+def _looks_like_harness_summary_failure(text: str) -> bool:
+    lowered = str(text or "").casefold()
+    if "hermes summary:" not in lowered:
+        return False
+    return any(
+        marker in lowered
+        for marker in (
+            "status: failed",
+            "no executable plan",
+            "no state_dir was recorded",
+            "resume: unavailable",
+        )
+    )
+
+
+def _orchestrate_request_from_args(args: list[str]) -> str:
+    if not args or args[0] != "orchestrate":
+        return ""
+    if len(args) > 1 and not str(args[1]).startswith("--"):
+        return str(args[1])
+    return ""
+
+
+def _flag_value(args: list[str], flag: str) -> str:
+    try:
+        index = args.index(flag)
+    except ValueError:
+        return ""
+    if index + 1 >= len(args):
+        return ""
+    return str(args[index + 1])
 
 
 def _normalize_text(text: str) -> str:
