@@ -166,7 +166,7 @@ class HarnessGatewayBridge:
                 error=str(exc),
             )
             raise
-        self._remember(session_key, payload)
+        self._remember(session_key, payload, request=target.request)
         self._log_event(
             "telegram_plan_result",
             session_key=session_key,
@@ -180,7 +180,7 @@ class HarnessGatewayBridge:
                 ["orchestrate", "--resume", str(payload.get("state_dir") or "")],
                 timeout=RUN_TIMEOUT_SECONDS,
             )
-            self._remember(session_key, run_payload)
+            self._remember(session_key, run_payload, request=target.request)
             self._log_event(
                 "telegram_auto_run_result",
                 session_key=session_key,
@@ -200,6 +200,8 @@ class HarnessGatewayBridge:
         lines = [summarize_payload(payload)]
         if payload_questions(payload):
             lines.append("I need the missing detail before I can proceed.")
+        elif str(payload.get("status") or "") in {"failed", "invalid_plan"}:
+            lines.append("I will not run this automatically; the diagnostic blocker needs to be fixed or the request retried.")
         elif _manual_run_workflow_labels(payload):
             lines.append(
                 "I have this saved, but Telegram will not auto-run service, delivery, "
@@ -235,7 +237,7 @@ class HarnessGatewayBridge:
                 error=str(exc),
             )
             raise
-        self._remember(session_key, payload)
+        self._remember(session_key, payload, request=session.pending_request)
         self._log_event(
             "telegram_run_result",
             session_key=session_key,
@@ -303,7 +305,7 @@ class HarnessGatewayBridge:
                 error=str(exc),
             )
             raise
-        self._remember(session_key, payload)
+        self._remember(session_key, payload, request=session.pending_request or answer_text)
         self._log_event(
             "telegram_answer_result",
             session_key=session_key,
@@ -317,7 +319,7 @@ class HarnessGatewayBridge:
                 ["orchestrate", "--resume", str(payload.get("state_dir") or session.state_dir)],
                 timeout=RUN_TIMEOUT_SECONDS,
             )
-            self._remember(session_key, run_payload)
+            self._remember(session_key, run_payload, request=session.pending_request or answer_text)
             self._log_event(
                 "telegram_auto_run_result",
                 session_key=session_key,
@@ -337,6 +339,8 @@ class HarnessGatewayBridge:
         lines = [summarize_payload(payload)]
         if payload_questions(payload):
             lines.append("I need the missing detail before I can proceed.")
+        elif str(payload.get("status") or "") in {"failed", "invalid_plan"}:
+            lines.append("I will not run this automatically; the diagnostic blocker needs to be fixed or the request retried.")
         elif _manual_run_workflow_labels(payload):
             lines.append(
                 "I have this saved, but Telegram will not auto-run service, delivery, "
@@ -362,7 +366,7 @@ class HarnessGatewayBridge:
         )
         if not reply:
             return ""
-        self._remember(session_key, payload)
+        self._remember(session_key, payload, request=text)
         self._log_event(
             "telegram_followup_result",
             session_key=session_key,
@@ -501,7 +505,7 @@ class HarnessGatewayBridge:
             lines.append("Last orchestration states: none")
         return "\n".join(lines)
 
-    def _remember(self, session_key: str, payload: Mapping[str, Any]) -> None:
+    def _remember(self, session_key: str, payload: Mapping[str, Any], *, request: str | None = None) -> None:
         state_dir = str(payload.get("state_dir") or "").strip()
         if not state_dir:
             return
@@ -509,18 +513,20 @@ class HarnessGatewayBridge:
         matter_id = str(plan.get("matter_id") or "").strip()
         matter_path = str(plan.get("matter_path") or "").strip()
         has_questions = bool(payload_questions(payload))
+        existing = self._session(session_key)
+        pending_request = (request or (existing.pending_request if existing is not None else "") or "").strip()
         self.sessions[session_key] = HarnessSession(
             state_dir=state_dir,
             status=str(payload.get("status") or "unknown"),
             has_questions=has_questions,
-            pending_request="",
+            pending_request=pending_request,
         )
         self._update_memory(
             session_key,
             state_dir=state_dir,
             status=str(payload.get("status") or "unknown"),
             has_questions=has_questions,
-            pending_request="",
+            pending_request=pending_request,
             matter_id=matter_id,
             matter_path=matter_path,
         )
@@ -620,7 +626,7 @@ class HarnessGatewayBridge:
             "--hermes-home",
             str(self.hermes_home),
         ]
-        completed = await self._run(command, timeout=timeout)
+        completed = await self._run(command, timeout=timeout, ok_returncodes=(0, 1, 2))
         try:
             payload = json.loads(completed[0])
         except json.JSONDecodeError as exc:
@@ -656,7 +662,13 @@ class HarnessGatewayBridge:
             text += " (" + ", ".join(down[:6]) + (", ..." if len(down) > 6 else "") + ")"
         return text
 
-    async def _run(self, command: list[str], *, timeout: int) -> tuple[str, str]:
+    async def _run(
+        self,
+        command: list[str],
+        *,
+        timeout: int,
+        ok_returncodes: tuple[int, ...] = (0, 2),
+    ) -> tuple[str, str]:
         env = self._subprocess_env()
         proc = await asyncio.create_subprocess_exec(
             *command,
@@ -673,7 +685,7 @@ class HarnessGatewayBridge:
             raise RuntimeError(f"Harness command timed out after {timeout}s") from exc
         stdout = stdout_b.decode("utf-8", errors="replace")
         stderr = stderr_b.decode("utf-8", errors="replace")
-        if proc.returncode not in (0, 2):
+        if proc.returncode not in ok_returncodes:
             raise RuntimeError(safe_error_line(stderr or stdout))
         return stdout, stderr
 
@@ -682,6 +694,7 @@ class HarnessGatewayBridge:
         env["FAMILY_ANT_EXECUTION_MODE"] = LOCAL_MODE
         env["FAMILY_ANT_HERMES_HOME"] = str(self.hermes_home)
         env["HERMES_CODEX_FAILURE_ADVISOR"] = "1"
+        env.setdefault("HERMES_CODEX_FAILURE_ADVISOR_TIMEOUT", "45")
         env["PYTHONNOUSERSITE"] = "1"
         env["PYTHONPATH"] = _prepend_pythonpath(self.repo_root, env.get("PYTHONPATH"))
         return env

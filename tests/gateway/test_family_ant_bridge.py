@@ -152,6 +152,9 @@ class StubHarnessBridge(HarnessGatewayBridge):
             "steps": [],
         }
 
+    def _associate_response(self, session_key: str, *, request: str, run_payload: dict, plan_payload: dict | None = None) -> str:
+        return summarize_payload(run_payload)
+
 
 class ManualBoundaryBridge(StubHarnessBridge):
     async def _run_orchestrate(self, args: list[str], *, timeout: int) -> dict:
@@ -177,12 +180,32 @@ class IntakeQuestionBridge(StubHarnessBridge):
         return MatterTarget("chipman-chris", Path("/tmp/chipman"), request)
 
 
+class FailedJsonSubprocessBridge(HarnessGatewayBridge):
+    def __init__(self) -> None:
+        super().__init__(hermes_home=Path(tempfile.mkdtemp(prefix="hermes-test-home-")))
+        self.ok_returncodes: tuple[int, ...] | None = None
+
+    def _resolve_matter(self, request: str, *, session_key: str) -> MatterTarget:
+        return MatterTarget("chipman-chris", Path("/tmp/chipman"), request)
+
+    async def _run(
+        self,
+        command: list[str],
+        *,
+        timeout: int,
+        ok_returncodes: tuple[int, ...] = (0, 2),
+    ) -> tuple[str, str]:
+        self.ok_returncodes = ok_returncodes
+        return json.dumps(_failed_harness_payload()), ""
+
+
 def test_bridge_plan_builds_dry_run_command_and_remembers_state():
     bridge = StubHarnessBridge()
     rendered = asyncio.run(bridge.plan("session-1", "Chipman: summarize status"))
     assert rendered.startswith("Analysis:")
     assert "Next: send go" not in rendered
     assert bridge.sessions["session-1"].state_dir.endswith("state-1")
+    assert bridge.sessions["session-1"].pending_request == "Chipman: summarize status"
     assert bridge.commands[0][0] == "orchestrate"
     assert bridge.commands[0][1].splitlines()[0] == "Chipman: summarize status"
     assert "Recent Hermes chat memory" in bridge.commands[0][1]
@@ -255,6 +278,16 @@ def test_bridge_ignores_closed_persistent_chat_memory(tmp_path):
         bridge._resolve_matter("same client summarize search history", session_key="session-1")
 
 
+def test_bridge_sets_bounded_failure_advisor_timeout(tmp_path, monkeypatch):
+    monkeypatch.delenv("HERMES_CODEX_FAILURE_ADVISOR_TIMEOUT", raising=False)
+    bridge = HarnessGatewayBridge(hermes_home=tmp_path)
+
+    env = bridge._subprocess_env()
+
+    assert env["HERMES_CODEX_FAILURE_ADVISOR"] == "1"
+    assert env["HERMES_CODEX_FAILURE_ADVISOR_TIMEOUT"] == "45"
+
+
 def test_request_with_memory_context_preserves_first_line_for_intake():
     from gateway.family_ant_bridge import _request_with_memory_context
 
@@ -294,6 +327,48 @@ def test_formatter_includes_case_search_answer():
     assert "Answer (NEEDS_REVIEW, 1 sources): Found depression references [S1]." in rendered
     assert "Plan steps:" not in rendered
     assert "Status:" not in rendered
+
+
+def _failed_harness_payload() -> dict:
+    return {
+        "status": "failed",
+        "state_dir": "/repo/runs/hermes-orchnl/state-failed",
+        "plan": {
+            "summary": "Hermes failed before it could build an executable plan.",
+            "steps": [],
+        },
+        "validation": {
+            "questions": [],
+            "errors": ["cli_orchestrate_failed:RuntimeError: router setup exploded"],
+        },
+        "steps": [],
+        "failure_advice": {
+            "status": "completed",
+            "text": "root cause: router setup exploded; immediate retry/fix: inspect config.",
+        },
+    }
+
+
+def test_formatter_includes_failure_advice():
+    rendered = summarize_payload(_failed_harness_payload())
+
+    assert "Hermes failed before it returned a reliable legal-workflow answer" in rendered
+    assert "Diagnostics:" in rendered
+    assert "Codex diagnostic (completed): root cause: router setup exploded" in rendered
+    assert "Validation: cli_orchestrate_failed:RuntimeError: router setup exploded" in rendered
+    assert "No artifact or legal conclusion was produced" in rendered
+
+
+def test_bridge_accepts_failed_json_payload_from_harness_returncode():
+    bridge = FailedJsonSubprocessBridge()
+    rendered = asyncio.run(bridge.plan("session-1", "Chipman: update profile and wiki"))
+
+    assert bridge.ok_returncodes == (0, 1, 2)
+    assert "Hermes failed before it returned a reliable legal-workflow answer" in rendered
+    assert "Codex diagnostic (completed): root cause: router setup exploded" in rendered
+    assert "I will not run this automatically" in rendered
+    assert "I can run this now unless" not in rendered
+    assert bridge.sessions["session-1"].pending_request == "Chipman: update profile and wiki"
 
 
 def test_bridge_plan_writes_prompt_ledger(tmp_path, monkeypatch):

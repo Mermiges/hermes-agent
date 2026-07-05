@@ -28,6 +28,11 @@ def summarize_payload(payload: Mapping[str, Any]) -> str:
         lines.append(f"I have a saved executable plan to {action}.")
     elif status in {"completed", "needs_review"}:
         lines.append(f"Hermes returned a reviewable result for the plan to {action}.")
+    elif status == "failed":
+        lines.append(
+            "Hermes failed before it returned a reliable legal-workflow answer. "
+            "I preserved the diagnostic state and am treating this as an orchestration failure, not attorney work product."
+        )
     else:
         lines.append(
             f"Hermes returned `{status}` for the plan to {action}. I am treating that as workflow posture, "
@@ -40,6 +45,10 @@ def summarize_payload(payload: Mapping[str, Any]) -> str:
         lines.append("- Steps: " + ", ".join(workflows))
     if state_name != "none":
         lines.append("- Saved state: " + state_name)
+    diagnostics = diagnostic_lines(payload)
+    if diagnostics:
+        lines.extend(["", "Diagnostics:"])
+        lines.extend(diagnostics)
     if questions:
         lines.extend(["", "Needed detail:"])
         lines.extend(f"- {name}: {question}" for name, question in questions[:8])
@@ -60,6 +69,8 @@ def summarize_payload(payload: Mapping[str, Any]) -> str:
         )
     elif status == "dry_run":
         lines.append("- This is a plan posture only; no artifact or legal conclusion has been produced by this reply.")
+    elif status == "failed":
+        lines.append("- No artifact or legal conclusion was produced by this failed orchestration summary.")
     else:
         lines.append("- This Telegram summary does not substitute for opening the artifact or source record.")
     lines.extend(["", "Next:"])
@@ -71,6 +82,8 @@ def summarize_payload(payload: Mapping[str, Any]) -> str:
         )
     elif status == "dry_run":
         lines.append("- I will run safe registered workflows automatically from normal Telegram requests; this saved plan remains available for manual execution.")
+    elif status == "failed":
+        lines.append("- Fix the diagnostic blocker or retry the same request; the saved state is available for debugging.")
     else:
         lines.append("- Review the source-backed result or artifact before relying on it outside the firm.")
     return "\n".join(lines)[:3900]
@@ -108,6 +121,8 @@ def _plain_action_summary(plan: Mapping[str, Any], workflows: list[str]) -> str:
     if workflows:
         return "run " + ", ".join(workflows)
     summary = one_line(str(plan.get("summary") or ""), 220)
+    if "failed before it could build" in summary.casefold():
+        return "diagnose the failed Hermes orchestration"
     return summary or "run the requested local Hermes task"
 
 
@@ -156,6 +171,32 @@ def artifact_names(steps: Any) -> list[str]:
                 if name:
                     names.append(name)
     return list(dict.fromkeys(names))
+
+
+def diagnostic_lines(payload: Mapping[str, Any]) -> list[str]:
+    lines: list[str] = []
+    advice = payload.get("failure_advice")
+    if isinstance(advice, Mapping):
+        text = one_line(str(advice.get("text") or advice.get("error") or ""), 900)
+        if text:
+            status = one_line(str(advice.get("status") or ""), 80)
+            prefix = f"Codex diagnostic ({status}): " if status else "Codex diagnostic: "
+            lines.append("- " + prefix + text)
+    error = one_line(str(payload.get("error") or ""), 500)
+    if error:
+        lines.append("- Harness error: " + error)
+    validation = payload.get("validation") if isinstance(payload.get("validation"), Mapping) else {}
+    raw_errors = validation.get("errors") if isinstance(validation.get("errors"), list) else []
+    if not raw_errors and isinstance(payload.get("validation_errors"), list):
+        raw_errors = payload.get("validation_errors")
+    seen: set[str] = set()
+    for item in raw_errors[:4]:
+        line = one_line(str(item or ""), 500)
+        if not line or line in seen:
+            continue
+        seen.add(line)
+        lines.append("- Validation: " + line)
+    return lines
 
 
 def one_line(text: str, limit: int) -> str:
