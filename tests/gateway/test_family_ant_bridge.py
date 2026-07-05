@@ -300,6 +300,44 @@ class NonJsonSummaryBridge(HarnessGatewayBridge):
         }
 
 
+class FleetStatusHarnessBridge(HarnessGatewayBridge):
+    def __init__(self) -> None:
+        super().__init__(hermes_home=Path(tempfile.mkdtemp(prefix="hermes-test-home-")))
+        self.command: list[str] = []
+        self.timeout: int | None = None
+
+    async def _run(
+        self,
+        command: list[str],
+        *,
+        timeout: int,
+        ok_returncodes: tuple[int, ...] = (0, 2),
+    ) -> tuple[str, str]:
+        self.command = command
+        self.timeout = timeout
+        return (
+            json.dumps(
+                {
+                    "consumers": [
+                        {
+                            "name": "fart_122b_brain",
+                            "health_url": "http://192.168.0.6:8105/health",
+                            "health": True,
+                            "readiness": {"ok": True},
+                        },
+                        {
+                            "name": "boner_premium_8210",
+                            "health_url": "http://192.168.0.8:8210/health",
+                            "health": True,
+                            "readiness": {"ok": False, "error": "timeout"},
+                        },
+                    ]
+                }
+            ),
+            "",
+        )
+
+
 def test_bridge_plan_builds_dry_run_command_and_remembers_state():
     bridge = StubHarnessBridge()
     rendered = asyncio.run(bridge.plan("session-1", "Chipman: summarize status"))
@@ -427,6 +465,18 @@ def test_bridge_sets_bounded_failure_advisor_timeout(tmp_path, monkeypatch):
 
     assert env["HERMES_CODEX_FAILURE_ADVISOR"] == "1"
     assert env["HERMES_CODEX_FAILURE_ADVISOR_TIMEOUT"] == "45"
+
+
+def test_fleet_status_uses_completion_readiness_probe():
+    bridge = FleetStatusHarnessBridge()
+
+    rendered = asyncio.run(bridge._fleet_status())
+
+    assert "--readiness-probe" in bridge.command
+    assert "--readiness-timeout" in bridge.command
+    assert bridge.timeout == 45
+    assert "Fleet health: 2 up, 0 down" in rendered
+    assert "readiness failures: boner_premium_8210" in rendered
 
 
 def test_request_with_memory_context_preserves_first_line_for_intake():

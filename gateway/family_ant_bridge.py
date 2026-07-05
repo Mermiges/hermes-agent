@@ -23,6 +23,7 @@ LOCAL_MODE = "local_first"
 DRY_TIMEOUT_SECONDS = 900
 RUN_TIMEOUT_SECONDS = 7200
 STATUS_TIMEOUT_SECONDS = 45
+STATUS_READINESS_TIMEOUT_SECONDS = 4
 
 _SECRET_PATTERNS = (
     re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9_\-]{12,}\b"),
@@ -775,6 +776,9 @@ class HarnessGatewayBridge:
             "tools/stack_status.py",
             "--format",
             "json",
+            "--readiness-probe",
+            "--readiness-timeout",
+            str(STATUS_READINESS_TIMEOUT_SECONDS),
         ]
         try:
             stdout, stderr = await self._run(command, timeout=STATUS_TIMEOUT_SECONDS)
@@ -790,9 +794,16 @@ class HarnessGatewayBridge:
         checked = [row for row in rows if isinstance(row, dict) and row.get("health_url")]
         up = sum(1 for row in checked if row.get("health") is True)
         down = [str(row.get("name") or "?") for row in checked if row.get("health") is False]
+        not_ready = [
+            str(row.get("name") or "?")
+            for row in checked
+            if isinstance(row.get("readiness"), Mapping) and row["readiness"].get("ok") is False
+        ]
         text = f"Fleet health: {up} up, {len(down)} down"
         if down:
             text += " (" + ", ".join(down[:6]) + (", ..." if len(down) > 6 else "") + ")"
+        if not_ready:
+            text += "; readiness failures: " + ", ".join(not_ready[:6]) + (", ..." if len(not_ready) > 6 else "")
         return text
 
     async def _run(
