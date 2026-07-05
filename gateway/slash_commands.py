@@ -381,6 +381,17 @@ class GatewaySlashCommandsMixin:
             f"Diagnostic: {type(exc).__name__}: {detail}"
         )
 
+    def _recover_harness_failure(self, bridge, session_key: str, request: str, exc: Exception) -> str:
+        """Ask the Family Ant bridge to persist a failed diagnostic state when possible."""
+
+        failure_reply = getattr(bridge, "failure_reply", None)
+        if callable(failure_reply):
+            try:
+                return failure_reply(session_key, request, exc)
+            except Exception:  # noqa: BLE001 - fall back to the generic associate-style failure.
+                pass
+        return self._format_harness_failure(exc)
+
     async def _handle_harness_plain_message(self, event: MessageEvent) -> str:
         """Route a normal Telegram DM through the Family Ant harness bridge."""
         text = (event.text or "").strip()
@@ -396,40 +407,45 @@ class GatewaySlashCommandsMixin:
             return await bridge.plan(session_key, text)
         except Exception as exc:  # noqa: BLE001 - Telegram needs a short failure line.
             logger.warning("Family Ant plain NL failed: %s: %s", type(exc).__name__, exc)
-            return self._format_harness_failure(exc)
+            return self._recover_harness_failure(bridge, session_key, text, exc)
 
     async def _handle_harness_command(self, event: MessageEvent) -> str:
         """Handle /harness — dry-run a Family Ant Hermes orchestration plan."""
         session_key = self._session_key_for_source(event.source)
+        bridge = self._family_ant_harness_bridge()
+        request = event.get_command_args()
         try:
-            return await self._family_ant_harness_bridge().plan(
+            return await bridge.plan(
                 session_key,
-                event.get_command_args(),
+                request,
             )
         except Exception as exc:  # noqa: BLE001 - Telegram needs a short failure line.
             logger.warning("Family Ant /harness failed: %s: %s", type(exc).__name__, exc)
-            return self._format_harness_failure(exc)
+            return self._recover_harness_failure(bridge, session_key, request, exc)
 
     async def _handle_go_command(self, event: MessageEvent) -> str:
         """Handle /go — execute the saved Family Ant dry-run plan."""
         session_key = self._session_key_for_source(event.source)
+        bridge = self._family_ant_harness_bridge()
         try:
-            return await self._family_ant_harness_bridge().go(session_key)
+            return await bridge.go(session_key)
         except Exception as exc:  # noqa: BLE001 - Telegram needs a short failure line.
             logger.warning("Family Ant /go failed: %s: %s", type(exc).__name__, exc)
-            return self._format_harness_failure(exc)
+            return self._recover_harness_failure(bridge, session_key, event.text or "go", exc)
 
     async def _handle_answer_command(self, event: MessageEvent) -> str:
         """Handle /answer — answer pending Family Ant orchestration questions."""
         session_key = self._session_key_for_source(event.source)
+        bridge = self._family_ant_harness_bridge()
+        answer = event.get_command_args()
         try:
-            return await self._family_ant_harness_bridge().answer(
+            return await bridge.answer(
                 session_key,
-                event.get_command_args(),
+                answer,
             )
         except Exception as exc:  # noqa: BLE001 - Telegram needs a short failure line.
             logger.warning("Family Ant /answer failed: %s: %s", type(exc).__name__, exc)
-            return self._format_harness_failure(exc)
+            return self._recover_harness_failure(bridge, session_key, answer, exc)
 
     async def _handle_brain_command(self, event: MessageEvent) -> str:
         """Handle /brain — switch the Family Ant Hermes router brain."""

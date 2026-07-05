@@ -131,6 +131,33 @@ class FailingBridge(FakeBridge):
         )
 
 
+class RecoveringFailingHarnessBridge(HarnessGatewayBridge):
+    def __init__(self, repo_root: Path) -> None:
+        super().__init__(
+            repo_root=repo_root,
+            hermes_home=Path(tempfile.mkdtemp(prefix="hermes-test-home-")),
+        )
+        self.calls: list[tuple[str, str, str]] = []
+
+    async def plan(self, session_key: str, request: str) -> str:
+        self.calls.append(("plan", session_key, request))
+        raise RuntimeError(
+            "Hermes summary:\n"
+            "- status: failed\n"
+            "- planned: no executable plan\n"
+            "- ran: nothing\n"
+            "- produced: no artifact paths reported\n"
+            "- codex_help: not requested\n"
+            "- resume: unavailable; no state_dir was recorded"
+        )
+
+    def _codex_failure_advice(self, payload: dict, *, state_dir: Path) -> dict:
+        return {
+            "status": "completed",
+            "text": "root cause: gateway caught raw Hermes summary; retry through structured payload boundary.",
+        }
+
+
 class StubHarnessBridge(HarnessGatewayBridge):
     def __init__(self) -> None:
         super().__init__(hermes_home=Path(tempfile.mkdtemp(prefix="hermes-test-home-")))
@@ -535,6 +562,24 @@ def test_plain_harness_failure_is_associate_style_not_raw_runtime_error():
         "agent:main:telegram:dm:c1",
         "Chipman: update profile and wiki",
     )
+
+
+def test_plain_harness_failure_recovers_with_persisted_diagnostic_state(tmp_path: Path):
+    bridge = RecoveringFailingHarnessBridge(tmp_path)
+    result = asyncio.run(
+        _runner(bridge)._handle_message(_event("Chipman: update profile and wiki"))
+    )
+
+    assert "Hermes failed before it returned a reliable legal-workflow answer" in result
+    assert "Saved state: gateway-failure-" in result
+    assert "Codex diagnostic (completed): root cause: gateway caught raw Hermes summary" in result
+    assert "I will not run this automatically" in result
+    assert "Harness command failed" not in result
+    assert "no state_dir was recorded" not in result
+    session = bridge.sessions["agent:main:telegram:dm:c1"]
+    state = json.loads((Path(session.state_dir) / "state.json").read_text(encoding="utf-8"))
+    assert state["failure_advice"]["status"] == "completed"
+    assert state["plan"]["request"] == "Chipman: update profile and wiki"
 
 
 def test_plain_go_dispatches_saved_harness_plan():

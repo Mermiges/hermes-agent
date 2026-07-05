@@ -508,6 +508,34 @@ class HarnessGatewayBridge:
             lines.append("Last orchestration states: none")
         return "\n".join(lines)
 
+    def failure_reply(self, session_key: str, request: str, exc: Exception) -> str:
+        """Recover a structured diagnostic when an older bridge path raises raw text."""
+
+        detail = f"{type(exc).__name__}: {safe_error_line(str(exc))}"
+        payload = self._synthesize_failed_orchestration_payload(
+            args=["orchestrate", request, "--dry-run"],
+            detail=detail,
+            reason="Gateway caught a Family Ant bridge exception before a structured payload was returned.",
+        )
+        self._remember(session_key, payload, request=request)
+        self._log_event(
+            "telegram_bridge_failure_synthesized",
+            session_key=session_key,
+            text=request,
+            payload=payload,
+            status=str(payload.get("status") or "failed"),
+            state_dir=str(payload.get("state_dir") or ""),
+            error=detail,
+        )
+        reply = "\n".join(
+            [
+                summarize_payload(payload),
+                "I will not run this automatically; the diagnostic blocker needs to be fixed or the request retried.",
+            ]
+        ).strip()
+        self._append_chat(session_key, role="assistant", text=reply, event="failure_synthesized")
+        return reply
+
     def _remember(self, session_key: str, payload: Mapping[str, Any], *, request: str | None = None) -> None:
         state_dir = str(payload.get("state_dir") or "").strip()
         if not state_dir:
