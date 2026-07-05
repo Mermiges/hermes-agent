@@ -587,13 +587,56 @@ def test_bridge_ignores_closed_persistent_chat_memory(tmp_path):
 
 def test_bridge_sets_bounded_failure_advisor_timeout(tmp_path, monkeypatch):
     monkeypatch.delenv("HERMES_CODEX_FAILURE_ADVISOR_TIMEOUT", raising=False)
+    monkeypatch.delenv("HERMES_ROUTER_TIMEOUT_SECONDS", raising=False)
     bridge = HarnessGatewayBridge(hermes_home=tmp_path)
 
     env = bridge._subprocess_env()
 
     assert env["HERMES_CODEX_FAILURE_ADVISOR"] == "1"
     assert env["HERMES_CODEX_FAILURE_ADVISOR_TIMEOUT"] == "45"
+    assert env["HERMES_ROUTER_TIMEOUT_SECONDS"] == "120"
     assert env["HERMES_PYTHON"] == str(bridge.python_executable)
+
+
+def test_bridge_passes_interactive_router_timeout_to_family_ant_cli(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("HERMES_ROUTER_TIMEOUT_SECONDS", "37")
+    bridge = HarnessGatewayBridge(repo_root=tmp_path, hermes_home=tmp_path / "home")
+    captured: dict[str, object] = {}
+
+    async def fake_run(command, *, timeout, ok_returncodes=(0, 2)):
+        captured["command"] = list(command)
+        captured["timeout"] = timeout
+        captured["ok_returncodes"] = ok_returncodes
+        return (
+            json.dumps(
+                {
+                    "status": "dry_run",
+                    "state_dir": str(tmp_path / "state"),
+                    "plan": {"summary": "planned", "steps": []},
+                    "validation": {"questions": []},
+                    "steps": [],
+                }
+            ),
+            "",
+        )
+
+    bridge._run = fake_run  # type: ignore[method-assign]
+
+    payload = asyncio.run(
+        bridge._run_orchestrate(
+            ["orchestrate", "Chipman draft proposed order", "--dry-run"],
+            timeout=900,
+        )
+    )
+    command = captured["command"]
+
+    assert payload["status"] == "dry_run"
+    assert captured["timeout"] == 900
+    assert "--router-timeout-seconds" in command
+    assert command[command.index("--router-timeout-seconds") + 1] == "37"
 
 
 def test_bridge_defaults_family_ant_subprocess_python_to_gateway_interpreter(tmp_path, monkeypatch):

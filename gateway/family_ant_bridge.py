@@ -19,8 +19,10 @@ DEFAULT_REPO_ROOT = Path("/mnt/hdd/family-ant_harness_refactor")
 DEFAULT_HERMES_HOME = Path("/home/mermiges/.hermes")
 FAMILY_ANT_PYTHON_ENV = "HERMES_FAMILY_ANT_PYTHON"
 HERMES_PYTHON_ENV = "HERMES_PYTHON"
+ROUTER_TIMEOUT_ENV = "HERMES_ROUTER_TIMEOUT_SECONDS"
 ORCH_STATE_ROOT = Path("runs/hermes-orchnl")
 LOCAL_MODE = "local_first"
+INTERACTIVE_ROUTER_TIMEOUT_SECONDS = 120
 DRY_TIMEOUT_SECONDS = 900
 RUN_TIMEOUT_SECONDS = 7200
 STATUS_TIMEOUT_SECONDS = 45
@@ -663,11 +665,12 @@ class HarnessGatewayBridge:
             return
 
     async def _run_orchestrate(self, args: list[str], *, timeout: int) -> dict[str, Any]:
+        orchestrate_args = _with_interactive_router_timeout(args)
         command = [
             str(self.python_executable),
             "-m",
             "tools.hermes",
-            *args,
+            *orchestrate_args,
             "--repo-root",
             str(self.repo_root),
             "--hermes-home",
@@ -860,6 +863,7 @@ class HarnessGatewayBridge:
         env["FAMILY_ANT_HERMES_HOME"] = str(self.hermes_home)
         env["HERMES_CODEX_FAILURE_ADVISOR"] = "1"
         env.setdefault("HERMES_CODEX_FAILURE_ADVISOR_TIMEOUT", "45")
+        env[ROUTER_TIMEOUT_ENV] = str(_interactive_router_timeout_seconds())
         env[HERMES_PYTHON_ENV] = str(self.python_executable)
         env["PYTHONNOUSERSITE"] = "1"
         env["PYTHONPATH"] = _prepend_pythonpath(self.repo_root, env.get("PYTHONPATH"))
@@ -1308,6 +1312,25 @@ def _state_names_from_text(text: str) -> list[str]:
 
 def _prepend_pythonpath(repo_root: Path, existing: str | None) -> str:
     return str(repo_root) if not existing else f"{repo_root}{os.pathsep}{existing}"
+
+
+def _with_interactive_router_timeout(args: list[str]) -> list[str]:
+    if not args or args[0] != "orchestrate" or "--router-timeout-seconds" in args:
+        return list(args)
+    return [
+        *args,
+        "--router-timeout-seconds",
+        str(_interactive_router_timeout_seconds()),
+    ]
+
+
+def _interactive_router_timeout_seconds() -> int:
+    raw = os.environ.get(ROUTER_TIMEOUT_ENV)
+    try:
+        parsed = int(raw) if raw is not None else INTERACTIVE_ROUTER_TIMEOUT_SECONDS
+    except ValueError:
+        return INTERACTIVE_ROUTER_TIMEOUT_SECONDS
+    return parsed if parsed > 0 else INTERACTIVE_ROUTER_TIMEOUT_SECONDS
 
 
 def _default_python_executable() -> Path:
