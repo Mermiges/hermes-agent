@@ -797,7 +797,9 @@ class HarnessGatewayBridge:
         not_ready = [
             str(row.get("name") or "?")
             for row in checked
-            if isinstance(row.get("readiness"), Mapping) and row["readiness"].get("ok") is False
+            if row.get("health") is True
+            and isinstance(row.get("readiness"), Mapping)
+            and row["readiness"].get("ok") is False
         ]
         text = f"Fleet health: {up} up, {len(down)} down"
         if down:

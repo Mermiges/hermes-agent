@@ -331,6 +331,12 @@ class FleetStatusHarnessBridge(HarnessGatewayBridge):
                             "health": True,
                             "readiness": {"ok": False, "error": "timeout"},
                         },
+                        {
+                            "name": "down_shadow_lane",
+                            "health_url": "http://192.168.0.8:8158/health",
+                            "health": False,
+                            "readiness": {"ok": False, "error": "connection refused"},
+                        },
                     ]
                 }
             ),
@@ -475,8 +481,9 @@ def test_fleet_status_uses_completion_readiness_probe():
     assert "--readiness-probe" in bridge.command
     assert "--readiness-timeout" in bridge.command
     assert bridge.timeout == 45
-    assert "Fleet health: 2 up, 0 down" in rendered
+    assert "Fleet health: 2 up, 1 down" in rendered
     assert "readiness failures: boner_premium_8210" in rendered
+    assert "down_shadow_lane" not in rendered.split("readiness failures:", 1)[-1]
 
 
 def test_request_with_memory_context_preserves_first_line_for_intake():
