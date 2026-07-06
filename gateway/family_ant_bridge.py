@@ -1072,18 +1072,10 @@ def _plain_action_summary(payload: Mapping[str, Any]) -> str:
 
 
 def _should_auto_run_payload(payload: Mapping[str, Any]) -> bool:
-    if str(payload.get("status") or "") != "dry_run":
-        return False
-    if not str(payload.get("state_dir") or "").strip():
-        return False
-    if payload_questions(payload):
-        return False
-    plan = payload.get("plan") if isinstance(payload.get("plan"), Mapping) else {}
-    steps = plan.get("steps") if isinstance(plan.get("steps"), list) else []
-    labels = _workflow_labels(steps)
-    if _manual_run_labels(labels):
-        return False
-    return bool(labels)
+    # NDM directive 2026-07-06: Telegram plan/answer turns must never execute
+    # saved plans. Execution requires an explicit GO/RUN turn.
+    _ = payload
+    return False
 
 
 def _manual_run_workflow_labels(payload: Mapping[str, Any]) -> list[str]:

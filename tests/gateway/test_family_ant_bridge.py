@@ -468,9 +468,11 @@ def test_bridge_plan_builds_dry_run_command_and_remembers_state():
     bridge = StubHarnessBridge()
     rendered = asyncio.run(bridge.plan("session-1", "Chipman: summarize status"))
     assert rendered.startswith("Analysis:")
+    assert "NOT EXECUTED YET — reply GO/RUN to execute" in rendered
     assert "Next: send go" not in rendered
     assert bridge.sessions["session-1"].state_dir.endswith("state-1")
     assert bridge.sessions["session-1"].pending_request == "Chipman: summarize status"
+    assert len(bridge.commands) == 1
     assert bridge.commands[0][0] == "orchestrate"
     assert bridge.commands[0][1].splitlines()[0] == "Chipman: summarize status"
     assert "Recent Hermes chat memory" in bridge.commands[0][1]
@@ -480,7 +482,6 @@ def test_bridge_plan_builds_dry_run_command_and_remembers_state():
         "chipman-chris",
         "--matter-path",
     ]
-    assert bridge.commands[1] == ["orchestrate", "--resume", "/repo/runs/hermes-orchnl/state-1"]
 
 
 def test_bridge_does_not_auto_run_manual_service_boundary():
@@ -522,14 +523,20 @@ def test_bridge_go_marks_saved_plan_executed_in_state(tmp_path: Path):
     assert state["telegram_interaction"]["run_status"] == "completed"
 
 
-def test_bridge_completed_auto_run_says_what_it_will_do_first():
+def test_bridge_case_search_waits_for_go_before_running():
     bridge = CompletedAutoRunBridge()
     rendered = asyncio.run(bridge.plan("session-1", "Chipman: search history for depression"))
 
-    assert rendered.startswith("I will search the local case file and return a source-supported analysis.")
-    assert "\nAnalysis:" in rendered
-    assert "Found source-backed depression search-history references [S1]" in rendered
+    assert rendered.startswith("Analysis:")
+    assert "NOT EXECUTED YET — reply GO/RUN to execute" in rendered
+    assert "Found source-backed depression search-history references [S1]" not in rendered
     assert "Next: send go" not in rendered
+    assert len(bridge.commands) == 1
+
+    run_rendered = asyncio.run(bridge.go("session-1"))
+
+    assert "Found source-backed depression search-history references [S1]" in run_rendered
+    assert bridge.commands[1] == ["orchestrate", "--resume", "/repo/runs/hermes-orchnl/state-case-search"]
 
 
 def test_plain_answer_resumes_pending_intake_question():
@@ -539,6 +546,7 @@ def test_plain_answer_resumes_pending_intake_question():
 
     assert "reply normally" in first
     assert second.startswith("Analysis:")
+    assert "NOT EXECUTED YET — reply GO/RUN to execute" in second
     assert "Next: send go" not in second
     assert bridge.commands[0][1].splitlines()[0] == "Chipman Chris: summarize search history"
     assert "Recent Hermes chat memory" in bridge.commands[0][1]
@@ -893,7 +901,6 @@ def test_bridge_plan_writes_prompt_ledger(tmp_path, monkeypatch):
     assert [row["event"] for row in rows] == [
         "telegram_inbound",
         "telegram_plan_result",
-        "telegram_auto_run_result",
     ]
     assert rows[0]["text"] == "Chipman: summarize status"
     assert rows[1]["payload_summary"]["status"] == "dry_run"
