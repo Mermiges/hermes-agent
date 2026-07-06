@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping
 
+PLAN_NOT_EXECUTED_LINE = "NOT EXECUTED YET — reply GO/RUN to execute."
+
 
 def summarize_payload(payload: Mapping[str, Any]) -> str:
     plan = payload.get("plan") if isinstance(payload.get("plan"), Mapping) else {}
@@ -24,8 +26,10 @@ def summarize_payload(payload: Mapping[str, Any]) -> str:
             f"I have a saved executable plan to {action}, but I am holding auto-run because it crosses a "
             "service, delivery, court-facing finalization/export, or external account-sync boundary."
         )
+        lines.append(PLAN_NOT_EXECUTED_LINE)
     elif status == "dry_run":
         lines.append(f"I have a saved executable plan to {action}.")
+        lines.append(PLAN_NOT_EXECUTED_LINE)
     elif status in {"completed", "needs_review"}:
         lines.append(f"Hermes returned a reviewable result for the plan to {action}.")
     elif status == "failed":
@@ -38,6 +42,8 @@ def summarize_payload(payload: Mapping[str, Any]) -> str:
             f"Hermes returned `{status}` for the plan to {action}. I am treating that as workflow posture, "
             "not as a legal conclusion."
         )
+    if status == "dry_run" and PLAN_NOT_EXECUTED_LINE not in lines:
+        lines.append(PLAN_NOT_EXECUTED_LINE)
     summary = one_line(str(plan.get("summary") or ""), 420)
     if summary:
         lines.extend(["", "Plan:", "- " + summary])
@@ -81,7 +87,7 @@ def summarize_payload(payload: Mapping[str, Any]) -> str:
             "- Review the planned workflow, documents, recipients, and external-action boundary before running it manually from the saved state."
         )
     elif status == "dry_run":
-        lines.append("- I will run safe registered workflows automatically from normal Telegram requests; this saved plan remains available for manual execution.")
+        lines.append("- Reply GO/RUN when you want Hermes to execute this saved plan.")
     elif status == "failed":
         lines.append("- Fix the diagnostic blocker or retry the same request; the saved state is available for debugging.")
     else:

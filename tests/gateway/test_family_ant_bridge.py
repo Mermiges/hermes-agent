@@ -210,6 +210,50 @@ class ManualBoundaryBridge(StubHarnessBridge):
         }
 
 
+class StatefulManualBoundaryBridge(HarnessGatewayBridge):
+    def __init__(self, repo_root: Path) -> None:
+        super().__init__(
+            repo_root=repo_root,
+            hermes_home=Path(tempfile.mkdtemp(prefix="hermes-test-home-")),
+        )
+        self.commands: list[list[str]] = []
+        self.state_dir = repo_root / "runs" / "hermes-orchnl" / "state-service"
+
+    def _resolve_matter(self, request: str, *, session_key: str) -> MatterTarget:
+        return MatterTarget("chipman-chris", Path("/tmp/chipman"), request)
+
+    async def _run_orchestrate(self, args: list[str], *, timeout: int) -> dict:
+        self.commands.append(args)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        if "--resume" in args:
+            payload = {
+                "status": "completed",
+                "state_dir": str(self.state_dir),
+                "plan": {
+                    "summary": "Executed AIS email-service handoff.",
+                    "steps": [{"workflow": "service_email"}],
+                },
+                "validation": {"questions": []},
+                "steps": [{"artifact_paths": ["/tmp/service-report.md"], "workflow": "service_email"}],
+            }
+        else:
+            payload = {
+                "status": "dry_run",
+                "state_dir": str(self.state_dir),
+                "plan": {
+                    "summary": "Prepare an AIS email-service handoff for attorney review.",
+                    "steps": [{"workflow": "service_email"}],
+                },
+                "validation": {"questions": []},
+                "steps": [],
+            }
+        (self.state_dir / "state.json").write_text(json.dumps(payload), encoding="utf-8")
+        return payload
+
+    def _associate_response(self, session_key: str, *, request: str, run_payload: dict, plan_payload: dict | None = None) -> str:
+        return summarize_payload(run_payload)
+
+
 class CompletedAutoRunBridge(StubHarnessBridge):
     async def _run_orchestrate(self, args: list[str], *, timeout: int) -> dict:
         self.commands.append(args)
@@ -447,12 +491,35 @@ def test_bridge_does_not_auto_run_manual_service_boundary():
     assert bridge.commands[0][0] == "orchestrate"
     assert "--dry-run" in bridge.commands[0]
     assert rendered.startswith("Analysis:")
+    assert "NOT EXECUTED YET — reply GO/RUN to execute" in rendered
     assert "- Steps: service_email" in rendered
     assert "Status:" not in rendered
     assert "State:" not in rendered
     assert "will not auto-run service, delivery" in rendered
     assert "Review the documents, recipients" in rendered
     assert "I can run this now unless you say stop" not in rendered
+
+
+def test_bridge_stop_marks_saved_plan_failed_in_state(tmp_path: Path):
+    bridge = StatefulManualBoundaryBridge(tmp_path)
+
+    asyncio.run(bridge.plan("session-1", "Chipman: serve final packet by AIS email"))
+    asyncio.run(bridge.plan("session-1", "stop"))
+
+    state = json.loads((bridge.state_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["telegram_interaction"]["status"] == "failed"
+    assert state["telegram_interaction"]["reason"] == "stopped_without_execution"
+
+
+def test_bridge_go_marks_saved_plan_executed_in_state(tmp_path: Path):
+    bridge = StatefulManualBoundaryBridge(tmp_path)
+
+    asyncio.run(bridge.plan("session-1", "Chipman: serve final packet by AIS email"))
+    asyncio.run(bridge.go("session-1"))
+
+    state = json.loads((bridge.state_dir / "state.json").read_text(encoding="utf-8"))
+    assert state["telegram_interaction"]["status"] == "executed"
+    assert state["telegram_interaction"]["run_status"] == "completed"
 
 
 def test_bridge_completed_auto_run_says_what_it_will_do_first():

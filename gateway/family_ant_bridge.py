@@ -106,6 +106,7 @@ class HarnessGatewayBridge:
         if not request:
             return "Usage: /harness <request with client shorthand>"
         if _normalize_text(request) in _PLAIN_STOP:
+            self._fail_unexecuted_plan(session_key, reason="stopped_without_execution")
             self.sessions.pop(session_key, None)
             self._update_memory(
                 session_key,
@@ -120,6 +121,7 @@ class HarnessGatewayBridge:
         followup = self._completed_followup(session_key, request)
         if followup:
             return followup
+        self._fail_unexecuted_plan(session_key, reason="superseded_by_new_plan")
         try:
             target = self._resolve_matter(request, session_key=session_key)
         except BridgeUserQuestion as exc:
@@ -187,6 +189,7 @@ class HarnessGatewayBridge:
                 ["orchestrate", "--resume", str(payload.get("state_dir") or "")],
                 timeout=RUN_TIMEOUT_SECONDS,
             )
+            self._mark_plan_executed(str(payload.get("state_dir") or ""), run_payload)
             self._remember(session_key, run_payload, request=target.request)
             self._log_event(
                 "telegram_auto_run_result",
@@ -205,6 +208,7 @@ class HarnessGatewayBridge:
             reply = _auto_run_reply(payload, run_payload, rendered=reply)
             self._append_chat(session_key, role="assistant", text=reply, event="auto_run_result")
             return reply
+        self._mark_plan_awaiting_execution(payload, request=target.request)
         lines = [summarize_payload(payload)]
         if payload_questions(payload):
             lines.append("I need the missing detail before I can proceed.")
@@ -245,6 +249,7 @@ class HarnessGatewayBridge:
                 error=str(exc),
             )
             raise
+        self._mark_plan_executed(session.state_dir, payload)
         self._remember(session_key, payload, request=session.pending_request)
         self._log_event(
             "telegram_run_result",
@@ -268,6 +273,7 @@ class HarnessGatewayBridge:
         if not answer_text:
             return "I need the missing detail before I can proceed."
         if _normalize_text(answer_text) in _PLAIN_STOP:
+            self._fail_unexecuted_plan(session_key, reason="stopped_without_execution")
             self.sessions.pop(session_key, None)
             self._update_memory(
                 session_key,
@@ -327,6 +333,7 @@ class HarnessGatewayBridge:
                 ["orchestrate", "--resume", str(payload.get("state_dir") or session.state_dir)],
                 timeout=RUN_TIMEOUT_SECONDS,
             )
+            self._mark_plan_executed(str(payload.get("state_dir") or session.state_dir), run_payload)
             self._remember(session_key, run_payload, request=session.pending_request or answer_text)
             self._log_event(
                 "telegram_auto_run_result",
@@ -345,6 +352,7 @@ class HarnessGatewayBridge:
             reply = _auto_run_reply(payload, run_payload, rendered=reply)
             self._append_chat(session_key, role="assistant", text=reply, event="auto_run_result")
             return reply
+        self._mark_plan_awaiting_execution(payload, request=session.pending_request or answer_text)
         lines = [summarize_payload(payload)]
         if payload_questions(payload):
             lines.append("I need the missing detail before I can proceed.")
@@ -578,6 +586,57 @@ class HarnessGatewayBridge:
             pending_request=pending_request,
             matter_id=matter_id,
             matter_path=matter_path,
+        )
+
+    def _mark_plan_awaiting_execution(self, payload: Mapping[str, Any], *, request: str) -> None:
+        if str(payload.get("status") or "") != "dry_run":
+            return
+        state_dir = str(payload.get("state_dir") or "").strip()
+        if not state_dir:
+            return
+        _update_state_telegram_interaction(
+            self.repo_root,
+            state_dir,
+            {
+                "source": "hermes_gateway_bridge",
+                "status": "awaiting_go_run",
+                "request": request,
+                "updated_at": _utc_stamp(),
+                "failure_if_abandoned": True,
+            },
+        )
+
+    def _mark_plan_executed(self, state_dir: str, payload: Mapping[str, Any]) -> None:
+        if not state_dir:
+            return
+        _update_state_telegram_interaction(
+            self.repo_root,
+            state_dir,
+            {
+                "source": "hermes_gateway_bridge",
+                "status": "executed",
+                "run_status": str(payload.get("status") or "unknown"),
+                "updated_at": _utc_stamp(),
+                "failure_if_abandoned": False,
+            },
+        )
+
+    def _fail_unexecuted_plan(self, session_key: str, *, reason: str) -> None:
+        session = self._session(session_key)
+        if session is None or not session.state_dir:
+            return
+        if not _state_plan_awaits_execution(self.repo_root, session.state_dir):
+            return
+        _update_state_telegram_interaction(
+            self.repo_root,
+            session.state_dir,
+            {
+                "source": "hermes_gateway_bridge",
+                "status": "failed",
+                "reason": reason,
+                "updated_at": _utc_stamp(),
+                "failure_if_abandoned": False,
+            },
         )
 
     def _session(self, session_key: str) -> HarnessSession | None:
@@ -1040,6 +1099,74 @@ def _manual_run_labels(labels: list[str]) -> list[str]:
         if normalized in _MANUAL_RUN_WORKFLOWS:
             manual.append(label)
     return manual
+
+
+def _utc_stamp() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _state_json_path(repo_root: Path, raw_state_dir: str) -> Path | None:
+    raw_state_dir = str(raw_state_dir or "").strip()
+    if not raw_state_dir:
+        return None
+    raw = Path(raw_state_dir).expanduser()
+    if raw.name == "state.json":
+        path = raw
+    elif raw.is_absolute():
+        path = raw / "state.json"
+    else:
+        path = repo_root / ORCH_STATE_ROOT / raw.name / "state.json"
+    if not path.parent.exists():
+        return None
+    return path
+
+
+def _read_state_json(repo_root: Path, raw_state_dir: str) -> dict[str, Any] | None:
+    path = _state_json_path(repo_root, raw_state_dir)
+    if path is None:
+        return None
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _update_state_telegram_interaction(
+    repo_root: Path,
+    raw_state_dir: str,
+    update: Mapping[str, Any],
+) -> None:
+    path = _state_json_path(repo_root, raw_state_dir)
+    if path is None:
+        return
+    state = _read_state_json(repo_root, raw_state_dir)
+    if state is None:
+        return
+    current = state.get("telegram_interaction")
+    merged = dict(current) if isinstance(current, Mapping) else {}
+    merged.update(dict(update))
+    state["telegram_interaction"] = merged
+    try:
+        path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    except OSError:
+        return
+
+
+def _state_plan_awaits_execution(repo_root: Path, raw_state_dir: str) -> bool:
+    state = _read_state_json(repo_root, raw_state_dir)
+    if not state:
+        return False
+    interaction = state.get("telegram_interaction")
+    if isinstance(interaction, Mapping):
+        status = str(interaction.get("status") or "")
+        if status == "awaiting_go_run":
+            return True
+        if status in {"executed", "failed"}:
+            return False
+    return str(state.get("status") or "") == "dry_run"
 
 
 def _workflow_labels(steps: list[Any]) -> list[str]:
